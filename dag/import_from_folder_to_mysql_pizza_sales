@@ -1,0 +1,133 @@
+from airflow import DAG
+from airflow.operators.python import PythonOperator
+from datetime import datetime
+import pandas as pd
+import numpy as np
+import mysql.connector
+import os
+import tkinter as tk
+from tkinter import messagebox
+from functools import reduce
+
+today_date = datetime.today().strftime('%Y-%m-%d')
+path_folder = 'C:\\Users\\ACER\OneDrive - mail.unnes.ac.id\\Documents\\project\\folder_to_mysql\\target_folder'
+output_extract = f'C:\\Users\\ACER\\OneDrive - mail.unnes.ac.id\\Documents\\project\\folder_to_mysql\\output_etl\\extract_{today_date}.parquet'
+output_transform = f'C:\\Users\\ACER\\OneDrive - mail.unnes.ac.id\\Documents\\project\\folder_to_mysql\\output_etl\\transform_{today_date}.parquet'
+duplicated_id = f'C:\\Users\\ACER\\OneDrive - mail.unnes.ac.id\\Documents\\project\\folder_to_mysql\\output_etl\\duplicated_{today_date}.parquet'
+missing_data = f'C:\\Users\\ACER\\OneDrive - mail.unnes.ac.id\\Documents\\project\\folder_to_mysql\\output_etl\\missing_value_{today_date}.parquet'
+
+default_args = {
+    'owner': 'Dedy',
+    'depends_on_past': False,
+    'email_on_failure': False,
+    'email_on_retry': False,
+    'retries': 1,
+    'start_date': datetime(2024, 6, 18),
+    'catchup': False,
+}
+
+def extract():
+    df_list = []
+    for file in os.listdir(path_folder):
+        if file.endswith(".csv"):
+            file_path = os.path.join(path_folder, file)
+            try:
+                df = pd.read_csv(file_path)
+                df_list.append(df)
+                os.remove(file_path)
+            except Exception as e:
+                root = tk.Tk()
+                root.withdraw()
+                messagebox.showinfo("error",f"error remove file {file}: {e}")
+    df_combined = reduce(lambda left, right: pd.concat([left, right]), df_list)
+    df_combined.to_parquet(output_extract, engine='pyarrow')
+        
+def transform():
+    df = pd.read_parquet(output_extract)
+    df = df.drop_duplicates()
+    df = df[df['order_date'] == today_date]
+    df = df[['order_details_id','order_id','pizza_id','quantity','order_date','order_time','unit_price']]
+    columns_number = df.select_dtypes(include=['number']).columns
+    for i in columns_number:
+        df[i].fillna(0)
+
+    df_missing = df[df.isnull().any(axis=1)]
+    # Check if there are any rows with missing values
+    if not df_missing.empty:
+    # Display command-line prompt
+        root = tk.Tk()
+        root.withdraw()  # Hide the main window
+
+        df_missing.to_parquet(missing_data)
+        messagebox.showinfo("File Saved", f"missing value rows have been saved to {missing_data}")
+    df = df.dropna()
+    # Identify rows with duplicate 'id'
+    df_duplicates = df[df.duplicated(subset='order_details_id', keep=False)]
+    if not df_duplicates.empty:
+    # Initialize Tkinter
+        root = tk.Tk()
+        root.withdraw()  # Hide the main window
+
+        df_duplicates.to_parquet(duplicated_id)
+        messagebox.showinfo("File Saved", f"Duplicated rows have been saved to {duplicated_id}")
+
+    # Identify original rows without duplicates
+    df_tr_fit = df[~df.index.isin(df_duplicates.index)]
+    df_tr_fit.to_parquet(output_transform)
+
+def trans_new_data():
+    
+    conn = mysql.connector.connect(
+        host = 'localhost',
+        user = 'root',
+        password = '',
+        database = 'pizza_sales'
+    )
+    store_query = '''select store_id from pizza_store'''
+    store = pd.read_sql(store_query, conn)
+
+    df = pd.read_parquet(output_extract)
+    df_store = df.groupby('store_id','city')['store_name'].unique()
+
+
+def load():
+    df = pd.read_parquet(output_transform)
+    conn = mysql.connector.connect(
+        host = 'localhost',
+        user = 'root',
+        password = '',
+        database = 'pizza_sales'
+    )
+    cursor = conn.cursor()
+
+    for row in df.itertuples(index = False):
+        values = (row.order_details_id,row.order_id,row.pizza_id,row.quantity,row.order_date,row.order_time,row.unit_price)
+        insert_query = "INSERT INTO pizza_order (order_details_id,order_id,pizza_id,quantity,order_date,order_time,unit_price) \
+        values (%s,%s,%s,%s,%s,%s,%s)"
+        cursor.execute(insert_query, values)
+        conn.commit()
+
+with DAG(
+    dag_id='Load_data_to_mysql',
+    default_args=default_args,
+    description='ETL pipeline load data pizza store franchise',
+    schedule_interval = '0 9 * * *',
+) as dag:
+
+    extract_task = PythonOperator(
+        task_id='read_file_from_folder',
+        python_callable=extract,
+    )
+
+    transform_task = PythonOperator(
+        task_id='filtering_data',
+        python_callable=transform,
+    )
+
+    load_task = PythonOperator(
+        task_id='load_data_to_mysql',
+        python_callable=load,
+    )
+
+
+    extract_task >> transform_task >> load_task
