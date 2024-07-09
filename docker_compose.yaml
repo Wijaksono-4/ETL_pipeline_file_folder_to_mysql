@@ -1,0 +1,73 @@
+networks:
+  airflow:
+
+services:
+  postgres:
+    image: postgres:13.1
+    environment:
+      - POSTGRES_USER=airflow
+      - POSTGRES_DB=airflow
+      - POSTGRES_PASSWORD=airflow
+      - PGDATA=/var/lib/postgresql/data/pgdata
+    ports:
+      - 5432:5432
+    networks:
+      - airflow
+  webserver:
+    env_file:
+      - .env
+    image: apache/airflow:2.9.2-python3.9
+    ports:
+      - 8080:8080
+    volumes:
+      - ./airflow_files/dags:/opt/airflow/dags
+      - ./logs:/opt/airflow/logs
+      - ./airflow.cfg:/opt/airflow/airflow.cfg
+    deploy:
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+        window: 120s
+    depends_on:
+      - postgres
+      - initdb
+    command: webserver
+    networks:
+      - airflow
+  scheduler:
+    image: apache/airflow:2.9.2-python3.9
+    env_file:
+      - .env
+    volumes:
+      - ./airflow_files/dags:/opt/airflow/dags
+      - ./logs:/opt/airflow/logs
+      - ./airflow.cfg:/opt/airflow/airflow.cfg
+    command: scheduler
+    depends_on:
+      - initdb
+    deploy:
+      restart_policy:
+        condition: always
+        delay: 5s
+        window: 120s
+    networks:
+      - airflow
+  initdb:
+    image: apache/airflow:2.9.2-python3.9    
+    env_file:
+      - .env
+    volumes:
+      - ./airflow_files/dags:/opt/airflow/dags
+      - ./logs:/opt/airflow/logs
+    entrypoint: /bin/bash
+    deploy:
+      restart_policy:
+        condition: on-failure
+        delay: 8s
+        max_attempts: 5
+    command: -c "airflow db init && airflow users create --firstname dedy --lastname wijaksono --email dedywijakson@gmail.com --password AIR@Jakson004 --username dedy --role Admin"
+    depends_on:
+      - postgres
+    networks:
+      - airflow
